@@ -1,0 +1,15 @@
+Tamil-English-Dataset
+
+test.py
+
+__pycache__
+
+# Environments
+.env
+.envrc
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
