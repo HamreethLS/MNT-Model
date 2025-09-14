@@ -133,7 +133,7 @@ class Transformer(nn.Module):
         tgt_mask = (tgt != 0).unsqueeze(1).unsqueeze(2)   # (batch, 1, 1, tgt_len)
 
         seq_length = tgt.size(1)
-        nopeak_mask = torch.triu(torch.ones(1, seq_length, seq_length, device=device), diagonal=1).bool()
+        nopeak_mask = torch.triu(torch.ones(1 ,1, seq_length, seq_length, device=device), diagonal=1).bool()
         nopeak_mask = ~nopeak_mask   # invert to get lower-triangular
         tgt_mask = tgt_mask & nopeak_mask                 # combine
 
