@@ -43,73 +43,23 @@ def zero_all_grads(model):
     for p in get_params(model):
         p.zero_grad()
 
-def load_corpus(en_path, ta_path):
-    """Loads parallel corpus from two files."""
-    with open(en_path, 'r', encoding='utf-8') as f_en, \
-         open(ta_path, 'r', encoding='utf-8') as f_ta:
-        en_lines = [line.strip() for line in f_en.readlines()]
-        ta_lines = [line.strip() for line in f_ta.readlines()]
-    
-    assert len(en_lines) == len(ta_lines), "Mismatched number of lines in corpus files!"
-    corpus = list(zip(en_lines, ta_lines))
-    print(f"Loaded {len(corpus)} sentence pairs.")
-    return corpus
-
-def preprocess_and_save_batches(corpus, tokenizer, batch_size, max_seq_len, save_dir="processed_batches"):
+def set_train_mode(model, is_training: bool):
     """
-    Pre-processes the entire corpus, creates padded batches, and saves them to disk.
-    This avoids re-processing data every epoch, speeding up training significantly.
+    Recursively sets the training mode for all modules and layers
+    that have a `train` attribute (like Dropout).
     """
-    if os.path.exists(save_dir) and os.listdir(save_dir):
-        response = input(f"Found pre-processed batches in '{save_dir}'. Re-process? (yes/no): ").lower()
-        if response in ['n', 'no']:
-            print("Skipping pre-processing. Using existing batches.")
-            return sorted([os.path.join(save_dir, f) for f in os.listdir(save_dir) if f.endswith('.npz')])
-        else:
-            print("Re-processing data...")
-            shutil.rmtree(save_dir)
+    if hasattr(model, 'train'):
+        model.train = is_training
 
-    print(f"No pre-processed batches found or re-processing requested. Starting pre-processing...")
-    os.makedirs(save_dir, exist_ok=True)
-
-    processed_data = []
-    print("Tokenizing data...")
-    total_sentences = len(corpus)
-    for i, (src_text, tgt_text) in enumerate(corpus):
-        src_seq = tokenizer.encode(src_text)[:max_seq_len]
-        tgt_seq = tokenizer.encode(tgt_text)[:max_seq_len - 1]
-        tgt_input = [tokenizer.vocab.get('<sos>', 1)] + tgt_seq
-        tgt_expected = tgt_seq + [tokenizer.vocab.get('<eos>', 2)]
-        processed_data.append((src_seq, tgt_input, tgt_expected))
-        if (i + 1) % 500 == 0:
-            print(f"  Processed {i + 1}/{total_sentences} sentences...", end='\r')
-
-    processed_data.sort(key=lambda x: len(x[0]))
-    print("Tokenized and sorted all data by length.")
-
-    batch_files = []
-    pad_id = tokenizer.vocab.get('<pad>', 0)
-    import numpy as host_np
-
-    print("Creating and saving batches...")
-    num_batches = (len(processed_data) + batch_size - 1) // batch_size
-    for i in range(num_batches):
-        batch = processed_data[i*batch_size:(i+1)*batch_size]
-        if not batch: continue
-        src_seqs, tgt_inputs, tgt_expected = zip(*batch)
-        max_src_len = max(len(s) for s in src_seqs)
-        max_tgt_len = max(len(s) for s in tgt_inputs)
-        src_padded = host_np.array([s + [pad_id] * (max_src_len - len(s)) for s in src_seqs])
-        tgt_padded = host_np.array([s + [pad_id] * (max_tgt_len - len(s)) for s in tgt_inputs])
-        expected_padded = host_np.array([s + [pad_id] * (max_tgt_len - len(s)) for s in tgt_expected])
-        batch_filename = os.path.join(save_dir, f"batch_{i:05d}.npz")
-        host_np.savez_compressed(batch_filename, src=src_padded, tgt=tgt_padded, expected=expected_padded)
-        batch_files.append(batch_filename)
-        if (i + 1) % 100 == 0:
-            print(f"  Saved {i + 1}/{num_batches} batches...", end='\r')
-
-    print(f"Saved {len(batch_files)} pre-processed batches to '{save_dir}'.")
-    return sorted(batch_files)
+    # Recursively apply to sub-modules in a Transformer
+    if isinstance(model, Transformer):
+        modules = [
+            model.encoder_embedding, model.decoder_embedding,
+            *model.encoder_layers, *model.decoder_layers,
+            model.fc, model.dropout
+        ]
+        for module in modules:
+            set_train_mode(module, is_training)
 
 def save_checkpoint(model, optimizer, epoch, batch_idx, filename="checkpoint.npz"):
     """Saves model and optimizer state."""
@@ -150,25 +100,19 @@ if __name__ == "__main__":
     LEARNING_RATE = 0.0005
     EPOCHS = 10
     BATCH_SIZE = 4 # Further reduced to decrease memory usage
-    VOCAB_SIZE = 5000
-
-    # 2. Load Data
-    print("\nLoading training data...")
-    train_corpus = load_corpus('data1-5.en', 'data1-5.ta')
+    ACCUMULATION_STEPS = 4 # Effective batch size = BATCH_SIZE * ACCUMULATION_STEPS = 16
     
-    # 3. Train or Load Tokenizer
-    tokenizer_path = "bpe_tokenizer.json"
+    # 2. Load Tokenizer
+    print("\nLoading tokenizer...")
+    tokenizer_path = "bpe_tokenizer.json" # This should be created by train_tokenizer.py
     tokenizer = BpeTokenizer()
     try:
         tokenizer.load(tokenizer_path)
         print(f"Loaded tokenizer from {tokenizer_path}")
     except FileNotFoundError:
-        print("\nTraining Tokenizer...")
-        english_sentences = [pair[0] for pair in train_corpus]
-        tamil_sentences = [pair[1] for pair in train_corpus]
-        tokenizer.train(english_sentences + tamil_sentences, vocab_size=VOCAB_SIZE)
-        tokenizer.save(tokenizer_path)
-        print(f"Tokenizer trained and saved to {tokenizer_path}")
+        print(f"Error: Tokenizer file not found at '{tokenizer_path}'")
+        print("Please run 'preprocess_data.py' first to create the tokenizer and data batches.")
+        exit()
 
     SRC_VOCAB_SIZE = TGT_VOCAB_SIZE = tokenizer.get_vocab_size()
     print(f"Vocabulary size: {SRC_VOCAB_SIZE}")
@@ -190,7 +134,15 @@ if __name__ == "__main__":
     print("Model, Loss, and Optimizer initialized.")
 
     # 5. Pre-process data and load/save checkpoints
-    batch_files = preprocess_and_save_batches(train_corpus, tokenizer, BATCH_SIZE, MAX_SEQ_LENGTH)
+    batch_dir = "processed_batches"
+    if not os.path.exists(batch_dir) or not os.listdir(batch_dir):
+        print(f"Error: Processed data not found in '{batch_dir}'.")
+        print("Please run 'preprocess_data.py' first to create the data batches.")
+        exit()
+    
+    batch_files = sorted([os.path.join(batch_dir, f) for f in os.listdir(batch_dir) if f.endswith('.npz')])
+    print(f"Found {len(batch_files)} pre-processed batch files.")
+
     start_epoch, start_batch_idx = 0, 0
     checkpoint_path = "checkpoint.npz"
     if os.path.exists(checkpoint_path):
@@ -204,6 +156,7 @@ if __name__ == "__main__":
     checkpoint_interval = max(1, total_batches // 10) # Save ~10 times per epoch
 
     for epoch in range(start_epoch, EPOCHS):
+        set_train_mode(model, is_training=True) # Ensure model is in training mode
         epoch_loss = 0
         shuffled_indices = list(range(total_batches))
         random.shuffle(shuffled_indices)
@@ -231,26 +184,35 @@ if __name__ == "__main__":
             # --- Calculate Loss ---
             output_reshaped = output.reshape(-1, SRC_VOCAB_SIZE)
             expected_reshaped = expected_padded.flatten()
-            
             loss = loss_fn.forward(output_reshaped, expected_reshaped)
-            current_batch_loss = loss.data()
+            
+            # --- Scale loss for gradient accumulation ---
+            # This ensures the accumulated gradient has the same magnitude as a single large batch.
+            scaled_loss = loss / ACCUMULATION_STEPS
+            current_batch_loss = loss.data() # Log the unscaled loss for interpretability
             epoch_loss += current_batch_loss
 
             # --- Backward Pass ---
-            zero_all_grads(model)
-            loss.backward()
+            scaled_loss.backward()
 
-            # --- Update Weights ---
-            optimizer.step()
+            # --- Update Weights (after accumulating gradients) ---
+            if (i + 1) % ACCUMULATION_STEPS == 0:
+                optimizer.step()
+                zero_all_grads(model)
             
             # --- Print Progress Indicator ---
-            print(f"  Epoch {epoch + 1}/{EPOCHS} | Batch {i + 1}/{total_batches} | Loss: {current_batch_loss:.4f}   ", end='\r')
+            print(f"  Epoch {epoch + 1}/{EPOCHS} | Batch {i + 1}/{total_batches} | Loss: {current_batch_loss:.4f} | Effective BS: {BATCH_SIZE * ACCUMULATION_STEPS}   ", end='\r')
             
             # --- Save Checkpoint Periodically ---
             if (i + 1) % checkpoint_interval == 0:
                 save_checkpoint(model, optimizer, epoch, i, checkpoint_path)
                 # The print below is commented out to avoid disrupting the progress bar
                 # print(f"  ... Checkpoint saved at epoch {epoch+1}, batch {i+1}/{total_batches} ...")
+
+        # --- Final optimizer step for any remaining batches in the epoch ---
+        if (total_batches % ACCUMULATION_STEPS) != 0:
+            optimizer.step()
+            zero_all_grads(model)
 
         # Reset start_batch_idx for the next epoch
         start_batch_idx = 0
@@ -263,18 +225,15 @@ if __name__ == "__main__":
 
     # 7. Evaluation on Test Set
     print("\n--- Evaluating on Test Set ---")
-    test_corpus = load_corpus('data.en6', 'data.ta6')
+    try:
+        with open('data.en6', 'r', encoding='utf-8') as f_en, open('data.ta6', 'r', encoding='utf-8') as f_ta:
+            test_corpus = list(zip([l.strip() for l in f_en], [l.strip() for l in f_ta]))
+    except FileNotFoundError:
+        print("Test files (data.en6, data.ta6) not found. Skipping evaluation.")
+        test_corpus = []
 
-    # Set all dropout layers in the model to evaluation mode
-    for p in get_params(model):
-        # This is a bit of a hack; a better way would be to have a proper
-        # model.eval() method that traverses the module tree.
-        if hasattr(p, 'eval'):
-            p.eval()
-    # Also set dropout on the main transformer class if it has one
-    if hasattr(model, 'dropout') and hasattr(model.dropout, 'eval'):
-        model.dropout.eval()
-
+    # Set the entire model to evaluation mode (disables dropout)
+    set_train_mode(model, is_training=False)
 
     def translate(sentence):
         src_seq = tokenizer.encode(sentence)[:MAX_SEQ_LENGTH]

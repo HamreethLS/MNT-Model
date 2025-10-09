@@ -1,5 +1,25 @@
 import json
+import os
 from collections import defaultdict
+import heapq
+
+def print_progress_bar(iteration, total, prefix='', suffix='', length=50, fill='█'):
+    """
+    Call in a loop to create a terminal progress bar.
+    @params:
+        iteration   - Required  : current iteration (Int)
+        total       - Required  : total iterations (Int)
+        prefix      - Optional  : prefix string (Str)
+        suffix      - Optional  : suffix string (Str)
+        length      - Optional  : character length of bar (Int)
+        fill        - Optional  : bar fill character (Str)
+    """
+    percent = ("{0:.1f}").format(100 * (iteration / float(total)))
+    filled_length = int(length * iteration // total)
+    bar = fill * filled_length + '-' * (length - filled_length)
+    print(f'\r{prefix} |{bar}| {percent}% {suffix}', end='\r')
+    if iteration == total: 
+        print()
 
 class BpeTokenizer:
     """
@@ -13,14 +33,6 @@ class BpeTokenizer:
         # Pre-assign special tokens to fixed IDs
         self.special_tokens = ['<pad>', '<sos>', '<eos>', '<unk>']
         self.vocab = {token: i for i, token in enumerate(self.special_tokens)}
-
-    def _get_stats(self, ids):
-        """Counts the frequency of all adjacent pairs of integers in a list of lists."""
-        counts = defaultdict(int)
-        for sublist in ids:
-            for pair in zip(sublist, sublist[1:]):
-                counts[pair] += 1
-        return counts
 
     def _merge(self, ids, pair, idx):
         """Replaces all occurrences of a pair in a list of lists with a new integer."""
@@ -40,7 +52,7 @@ class BpeTokenizer:
 
     def train(self, corpus: list, vocab_size: int):
         """
-        Trains the tokenizer on a given corpus.
+        Trains the tokenizer on a given corpus using a priority queue for efficiency.
         
         Args:
             corpus (list[str]): A list of sentences to train on.
@@ -53,13 +65,61 @@ class BpeTokenizer:
         text_bytes = [s.encode("utf-8") for s in corpus]
         ids = [list(b) for b in text_bytes]
 
+        # --- New, Faster Algorithm ---
+        
+        # 1. Initial Count (scan corpus once)
+        print("Step 1/3: Counting initial pairs...")
+        stats = defaultdict(int)
+        for sublist in ids:
+            for pair in zip(sublist, sublist[1:]):
+                stats[pair] += 1
+
+        # 2. Populate Priority Queue
+        print("Step 2/3: Building priority queue...")
+        # We use a min-heap, so we store negative counts to simulate a max-heap
+        pq = [(-count, pair) for pair, count in stats.items()]
+        heapq.heapify(pq)
+
+        # 3. Iterative Merging
+        print(f"Step 3/3: Performing {num_merges} merges...")
+        print_progress_bar(0, num_merges, prefix='Progress:', suffix='Complete', length=50)
         for i in range(num_merges):
-            stats = self._get_stats(ids)
-            if not stats: break
-            best_pair = max(stats, key=stats.get)
+            if not pq:
+                break
+
+            # Get the most frequent pair
+            neg_count, best_pair = heapq.heappop(pq)
+            
             new_id = 256 + len(self.special_tokens) + i
-            ids = self._merge(ids, best_pair, new_id)
             self.merges[best_pair] = new_id
+
+            # This is a simplified update. A fully optimal version would be more complex.
+            # We still need to scan to merge, but we avoid re-counting everything.
+            new_ids = []
+            for sublist in ids:
+                new_sublist = []
+                j = 0
+                while j < len(sublist):
+                    if j < len(sublist) - 1 and (sublist[j], sublist[j+1]) == best_pair:
+                        new_sublist.append(new_id)
+                        j += 2
+                    else:
+                        new_sublist.append(sublist[j])
+                        j += 1
+                new_ids.append(new_sublist)
+            ids = new_ids
+            
+            # For simplicity, we won't dynamically update the PQ in this implementation,
+            # as it's very complex. We will just re-count and re-heapify periodically.
+            # This is a hybrid approach - faster than before, but not fully optimal.
+            if (i + 1) % 250 == 0 or i == num_merges - 1:
+                stats = defaultdict(int)
+                for sublist in ids:
+                    for pair in zip(sublist, sublist[1:]): stats[pair] += 1
+                pq = [(-count, pair) for pair, count in stats.items()]
+                heapq.heapify(pq)
+
+            print_progress_bar(i + 1, num_merges, prefix='Progress:', suffix='Complete', length=50)
 
     def get_vocab_size(self):
         vocab = {token: i for i, token in enumerate(self.special_tokens)}
